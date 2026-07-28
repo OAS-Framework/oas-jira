@@ -1,0 +1,11 @@
+{
+  "package": "oas.jira",
+  "version": "1.0.0",
+  "description": "Official OAS tasks integration for Jira using Atlassian's acli command-line interface.",
+  "compatibility": {
+    "oas": ">=0.19.0"
+  },
+  "capabilities": [
+    "capabilities/oas-jira"
+  ]
+}
