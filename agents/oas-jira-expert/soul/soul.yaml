@@ -1,0 +1,8 @@
+name: oas-jira-expert
+kind: persistent
+description: Owner of the official oas.jira package: Jira task integration, implementation, maintenance, releases, and support
+type: package-maintainers
+repo: /Users/pepe-reyero/oas-workspace/oas-jira
+work: worktree
+runtime: claude
+model: opus
