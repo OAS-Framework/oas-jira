@@ -1,6 +1,16 @@
 # Schema status
 
-- **Corrected schemas verified**: all three vendored schemas are byte-identical to the canonical package-engine reference now merged to main (reviewed head `af49fd542e7190d1da72a6e0b9214036b59cbd7c`; package-engine merge `612b4f8c48efb63be7435df3d4473feba7b25abf`; package-config merge `a0366349915f151b6f6897cb682b7258f9fc1d79`); CI validates package and capability manifests against them.
-- `TODO(engine-consumer-fixtures)`: run the released OAS 0.19.0 acquire → lock → trust → activate → spawn probe when WS1 fixtures are available.
+- **Vendored schemas verified against the RELEASED kernel**: `schemas/oas-package.schema.json`,
+  `schemas/oas-lock.schema.json` and `schemas/capability-manifest.schema.json` are
+  byte-identical to the `docs/` copies shipped in `@oas-framework/oas@0.20.0`.
+  `npm run validate` checks both manifests and the config template against them.
+- **Released-kernel consumer probe: CLOSED.** `TODO(engine-consumer-fixtures)` is
+  resolved. `npm run probe` exercises this package against a real released
+  0.20.0 kernel in a throwaway sandbox — acquisition (local path and Git source),
+  flat materialization, exact restore, host-requirement reporting, executable
+  trust, explicit template adoption, ignore behavior, and task-layer composition
+  at spawn. 14/14 checks pass; CI runs it on every push and pull request.
 
-No publication tag or catalog entry may be created while this item remains open.
+The package targets OAS `>=0.20.0`. The 0.19 floor and the `configs` template
+spelling are no longer emitted; `v1.0.0` remains published and untouched for
+0.19 consumers.

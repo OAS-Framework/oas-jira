@@ -1,0 +1,43 @@
+# oas.jira — reference tasks-layer configuration.
+#
+# This is a recommended STARTING POINT, not policy. Adopt it explicitly:
+#
+#   oas init --package oas.jira          # a scope with no oas-config.yaml yet
+#   oas config adopt oas.jira            # switch an existing scope to this base
+#
+# `oas install` never applies it. Once adopted the file is an ordinary scoped
+# config: every setting below is yours to change, and package updates never
+# rewrite it. Use `oas config diff` / `oas config sync` to review later changes
+# to this template without losing local edits.
+
+# Your deployment's name. Rename it — this placeholder means nothing on your side.
+name: my-deployment
+
+capabilities:
+  layers:
+    # Jira is an adopter-selected tasks provider. It is exclusive: binding it
+    # here replaces any other tasks layer at this scope. To opt a nested repo
+    # back out, set `tasks: none` in that repo's own oas-config.yaml.
+    tasks:
+      capability: oas.jira
+      # Use the materialized artifact under .agents/capabilities/installed/.
+      from: installed
+      global:
+        enabled: true
+        # The Jira site and project are DEPLOYMENT-owned and deliberately unset
+        # here: a template is portable and carries no account, site, or
+        # provider-local ID. Uncomment and fill both in before spawning agents.
+        # Until you do, `oas doctor` and the spawn hook report the settings as
+        # incomplete rather than guessing.
+        #
+        # settings:
+        #   site: your-site.atlassian.net
+        #   project: YOURPROJECTKEY
+
+# Requirement, not installed by this package: Atlassian's `acli` must be on
+# PATH and authenticated by a human (`acli jira auth login --web`). OAS reports
+# it as a missing host command until then; agents never authenticate themselves.
+#
+# The capability's executable spawn hook additionally needs explicit trust:
+#
+#   oas trust oas.jira
