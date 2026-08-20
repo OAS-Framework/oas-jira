@@ -183,6 +183,59 @@ test("validator accepts placeholder guidance in template COMMENTS", (t) => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+// --------------------------------------------------- template path portability
+// The machine-path rule encodes ABSOLUTENESS/host-anchoring rather than a list of
+// known prefixes. The earlier spelling enumerated only /Users/, /home/ and "C:\\",
+// so /tmp, /opt, ~/…, C:/…, UNC and root-relative Windows paths passed while the
+// validator still claimed to reject machine paths.
+const MACHINE_PATHS = [
+  ["posix-tmp", "/tmp/oas/state"],
+  ["posix-opt", "/opt/atlassian/acli"],
+  ["posix-users", "/Users/someone/work"],
+  ["posix-home", "/home/someone/work"],
+  ["home-relative", "~/oas/config"],
+  ["other-user-home", "~alice/oas/config"],
+  ["windows-drive-backslash", "C:\\Users\\someone"],
+  ["windows-drive-forwardslash", "C:/Users/someone"],
+  ["windows-unc", "\\\\server\\share\\oas"],
+  ["windows-root-relative", "\\Windows\\system32"],
+];
+
+for (const [label, value] of MACHINE_PATHS) {
+  test(`validator rejects a template carrying a machine path (${label})`, (t) => {
+    const template = PORTABLE_TEMPLATE + `        settings:\n          workdir: ${value}\n`;
+    const result = runFixture(t, ["capabilities/one"], {
+      configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
+    }, { templates: { "config-templates/default/oas-config.yaml": template } });
+    assert.equal(result.status, 1, `expected rejection for ${value}\n${result.stdout}`);
+    assert.match(result.stderr, /absolute or host-anchored path/);
+  });
+}
+
+test("validator accepts portable relative paths and URLs in a template", (t) => {
+  // Controls: a relative path is portable and a URL is location-independent.
+  // Neither may be swept up by the machine-path rule.
+  const template = PORTABLE_TEMPLATE + `        settings:\n` +
+    `          notes: config-templates/default/oas-config.yaml\n` +
+    `          relative: ./local/dir\n` +
+    `          nested: a/b/c\n` +
+    `          guide: https://developer.atlassian.com/cloud/acli/guides/install-acli/\n`;
+  const result = runFixture(t, ["capabilities/one"], {
+    configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
+  }, { templates: { "config-templates/default/oas-config.yaml": template } });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("validator does not trip on machine-path-shaped text in template COMMENTS", (t) => {
+  const template = PORTABLE_TEMPLATE +
+    `        # e.g. on macOS the store lives under /Users/<you>/.agents\n` +
+    `        # on Windows it is C:\\Users\\<you>\\.agents\n`;
+  const result = runFixture(t, ["capabilities/one"], {
+    configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
+  }, { templates: { "config-templates/default/oas-config.yaml": template } });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 // ----------------------------------------------------------- self-containment
 test("validator rejects a capability resource that escapes its own root", (t) => {
   const result = runFixture(t, ["capabilities/one"], {

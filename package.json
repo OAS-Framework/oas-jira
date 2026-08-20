@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "validate": "node scripts/validate-manifests.mjs",
-    "test": "npm run validate && node --test",
+    "test": "npm run validate && node --test test/manifest-validation.test.mjs test/oas-jira.test.mjs test/test-runner-config.test.mjs",
     "probe": "node scripts/consumer-probe.mjs"
   },
   "repository": {

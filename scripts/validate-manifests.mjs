@@ -100,6 +100,42 @@ function walkContained(dir, capabilityRoot, at, kind, declared, visited = new Se
   }
 }
 
+/** Is this token an absolute or host-anchored path?
+ *
+ * Encodes the PROPERTY (absoluteness / host-anchoring) rather than enumerating
+ * known prefixes. The previous spelling listed only /Users/, /home/ and `C:\\`,
+ * so it waved through /tmp, /opt, ~/…, C:/… , \\server\share and \Windows\…
+ * while still claiming to reject machine paths.
+ *
+ * A RELATIVE path is portable and must stay allowed (config templates legitimately
+ * reference package-relative locations), as must URLs. */
+function isMachinePath(token) {
+  if (!token) return false;
+  // A URL is not a machine path — scheme://… is location-independent.
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(token)) return false;
+  if (token.startsWith("/")) return true;                     // POSIX absolute
+  if (/^~($|[/\\])/.test(token)) return true;                  // home-relative (~ , ~/…)
+  if (/^~[^/\\]+([/\\]|$)/.test(token)) return true;           // another user's home (~alice/…)
+  if (/^[A-Za-z]:([/\\]|$)/.test(token)) return true;          // Windows drive, either separator
+  if (/^\\\\[^\\]/.test(token)) return true;                   // UNC \\server\share
+  if (/^\\(?!\\)/.test(token)) return true;                    // Windows root-relative \Windows\…
+  return false;
+}
+
+/** Pull the value tokens out of one effective YAML line, so the path check runs
+ * on VALUES rather than on whole lines — a key or prose word must not be able to
+ * trip it, and a quoted value must not be able to hide from it. */
+function valueTokens(line) {
+  const trimmed = line.trim().replace(/^-\s*/, "");           // list item marker
+  const colon = trimmed.search(/:(\s|$)/);
+  const raw = colon === -1 ? trimmed : trimmed.slice(colon + 1);
+  return raw
+    .replace(/^\s*\[|\]\s*$/g, "")                             // flow sequence brackets
+    .split(",")
+    .map((token) => token.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+}
+
 /** Templates are package SOURCE MATERIAL an adopter copies verbatim, so they
  * must stay PORTABLE: the schema forbids any secret, credential, account,
  * machine path or provider-local ID. Commentary may show placeholder examples
@@ -115,7 +151,6 @@ function lintTemplatePortability(file, at) {
   });
   const forbidden = [
     [/[A-Za-z0-9-]+\.atlassian\.net/, "a concrete Jira site — the site is deployment-owned and must be left unset"],
-    [/(?:\/Users\/|\/home\/|[A-Za-z]:\\)/, "an absolute machine path"],
     [/(?:^|[\s"'_.-])(?:api[_-]?key|secret|passwd|password|token|credential)s?\s*:/i, "a credential-shaped setting — credentials never live in OAS config"],
     [/\bproject\s*:\s*["']?[A-Z][A-Z0-9_]{1,}["']?\s*$/, "a concrete Jira project key — the project is deployment-owned and must be left unset"],
     [/\bteam\s*:\s*\S/, "a deployment team identity"],
@@ -123,6 +158,12 @@ function lintTemplatePortability(file, at) {
   for (const [index, line] of effective.entries()) {
     for (const [pattern, why] of forbidden) {
       if (pattern.test(line)) report(`${at}:${index + 1}`, `config template is not portable — it carries ${why}: ${line.trim()}`);
+    }
+    for (const token of valueTokens(line)) {
+      if (isMachinePath(token)) {
+        report(`${at}:${index + 1}`, `config template is not portable — it carries an absolute or host-anchored path (${token}): ${line.trim()}`);
+        break;
+      }
     }
   }
 }
