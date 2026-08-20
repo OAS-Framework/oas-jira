@@ -34,6 +34,12 @@ const CAPABILITY = "oas.jira";
 const results = [];
 let failed = 0;
 function check(name, fn) {
+  if (abortReason) {
+    results.push({ ok: false, name, detail: `not run — aborted after ${abortReason}` });
+    process.stdout.write(`  SKIP  ${name} — not run (aborted after ${abortReason})\n`);
+    failed++;
+    return;
+  }
   try {
     const detail = fn();
     results.push({ ok: true, name, detail });
@@ -83,8 +89,16 @@ mkdirSync(stubSentinels, { recursive: true });
 function writeStub(dir, name, why) {
   mkdirSync(dir, { recursive: true });
   const sentinel = join(stubSentinels, name);
+  // POSIX single-quoting, NOT JSON.stringify. A JS string literal is not a shell
+  // literal: inside the double quotes JSON.stringify produces, `$`, backticks and
+  // `$(...)` stay live. `sandbox` is derived from TMPDIR, so a TMPDIR containing
+  // shell metacharacters redirected the sentinel to an expanded path (leaving the
+  // real one absent, silently disabling this enforcement) and command
+  // substitution in the path would have EXECUTED. Single quotes suppress all
+  // expansion; an embedded quote is closed, escaped and reopened.
+  const shq = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
   writeFileSync(join(dir, name),
-    `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${JSON.stringify(sentinel)}\necho ${JSON.stringify(`probe stub: ${why}`)} >&2\nexit 97\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${shq(sentinel)}\nprintf '%s\\n' ${shq(`probe stub: ${why}`)} >&2\nexit 97\n`,
     { mode: 0o755 });
   return sentinel;
 }
@@ -103,13 +117,23 @@ const acliSentinel = writeStub(acliBin, "acli", "OAS reports acli PRESENCE and m
 
 const STUBS = [{ name: "pi", sentinel: piSentinel }, { name: "acli", sentinel: acliSentinel }];
 
-/** Fail the probe if any provisioned stub was executed. Called after every
- * kernel invocation so the failure names the command responsible. */
+/** Fail the probe if any provisioned stub was executed. Called after every kernel
+ * invocation, attributing only NEWLY appended records to that call — a sentinel
+ * left in place would otherwise be re-reported against every later command,
+ * masking their genuine failures behind a false "this command ran the stub".
+ * The first real detection aborts the run for the same reason. */
+const stubSeen = new Map(STUBS.map((stub) => [stub.name, 0]));
+let abortReason = null;
 function assertNoStubExecuted(args) {
   for (const stub of STUBS) {
     if (!existsSync(stub.sentinel)) continue;
-    const invocations = readFileSync(stub.sentinel, "utf8").trim();
-    throw new Error(`\`oas ${args.join(" ")}\` EXECUTED the ${stub.name} stub — OAS must only resolve it, never run it.\nInvocations:\n${invocations}`);
+    const text = readFileSync(stub.sentinel, "utf8");
+    const seen = stubSeen.get(stub.name);
+    if (text.length <= seen) continue;                 // already reported
+    stubSeen.set(stub.name, text.length);
+    const fresh = text.slice(seen).trim();
+    abortReason = `the ${stub.name} stub was executed`;
+    throw new Error(`\`oas ${args.join(" ")}\` EXECUTED the ${stub.name} stub — OAS must only resolve it, never run it.\nNew invocation(s):\n${fresh}`);
   }
 }
 
@@ -272,7 +296,35 @@ function walkFiles(dir, base = dir) {
 
 process.stdout.write(`\noas.jira consumer probe — payload ${packageManifest.package}@${packageManifest.version} (floor ${packageManifest.compatibility?.oas})\n\n`);
 
-// ---------------------------------------------------------------- 0. kernel
+// ------------------------------------------- 0. the enforcement itself is live
+// The sentinel mechanism is only a guarantee while it actually works for THIS
+// sandbox path. It silently died once already: the path was interpolated into
+// the stub with JS rather than shell quoting, so a TMPDIR containing shell
+// metacharacters redirected the sentinel elsewhere and left the enforcement
+// dead while every check still reported green.
+//
+// So prove it here, against the real provisioned stubs and the real path in use,
+// before anything relies on it. The deliberate invocation is then baselined out.
+check("the stub-execution enforcement is live for this sandbox path", () => {
+  const proof = [];
+  for (const stub of STUBS) {
+    const before = existsSync(stub.sentinel) ? readFileSync(stub.sentinel, "utf8").length : 0;
+    const dir = stub.name === "acli" ? acliBin : runtimeBin;
+    const r = spawnSync(join(dir, stub.name), ["--probe-selftest"], { encoding: "utf8" });
+    assert(r.status === 97, `${stub.name} stub exited ${r.status}, expected 97`);
+    assert(existsSync(stub.sentinel), `${stub.name} stub ran but wrote no sentinel — the enforcement is DEAD for path ${stub.sentinel}`);
+    const after = readFileSync(stub.sentinel, "utf8");
+    assert(after.length > before, `${stub.name} stub ran but appended no record — the enforcement is DEAD`);
+    assert(after.includes("--probe-selftest"), `${stub.name} sentinel did not record the invocation arguments`);
+    // Baseline this deliberate run out, so it is not reported against the first
+    // real kernel call.
+    stubSeen.set(stub.name, after.length);
+    proof.push(stub.name);
+  }
+  return `${proof.join(" + ")} stub invocations are detected at their real sandbox paths`;
+});
+
+// ---------------------------------------------------------------- 1. kernel
 check("kernel under test satisfies the declared compatibility floor", () => {
   const version = oas(["version", "--json"]).envelope;
   const actual = version.version || version.result?.version;
