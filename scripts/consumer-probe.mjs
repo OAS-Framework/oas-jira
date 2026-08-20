@@ -142,6 +142,16 @@ function newScope(name, { asGitRepo = false, withAgents = false } = {}) {
   return dir;
 }
 
+/** Name the entry type for a diagnostic — the digest refuses anything that is
+ * not a regular file, directory or symlink, and the reason should say which. */
+function describeEntryType(stat) {
+  if (stat.isFIFO()) return "FIFO";
+  if (stat.isSocket()) return "socket";
+  if (stat.isBlockDevice()) return "block device";
+  if (stat.isCharacterDevice()) return "character device";
+  return "unknown type";
+}
+
 /** A content-aware digest of a materialized artifact tree.
  *
  * Comparing file NAMES is not enough to call a restore "exact": a restore that
@@ -161,6 +171,14 @@ function artifactDigest(dir) {
       const stat = lstatSync(path);
       if (stat.isSymbolicLink()) { hash.update(`L ${rel} -> ${readlinkSync(path)}\n`); continue; }
       if (stat.isDirectory()) { hash.update(`D ${rel}\n`); walk(path); continue; }
+      // Everything else must be a REGULAR file. Falling through to readFileSync
+      // for any other type would hang on a FIFO and would digest a device node
+      // as though it were an ordinary file. A materialized capability artifact
+      // has no business containing either, so make that assumption loud instead
+      // of silently mis-hashing (or blocking) on it.
+      if (!stat.isFile()) {
+        throw new Error(`artifact contains a non-regular entry ${rel} (${describeEntryType(stat)}) — a materialized capability must be plain files, directories and symlinks only`);
+      }
       hash.update(`F ${rel} ${(stat.mode & 0o111) ? "x" : "-"} `);
       hash.update(createHash("sha256").update(readFileSync(path)).digest("hex"));
       hash.update("\n");
