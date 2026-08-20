@@ -55,11 +55,47 @@ cpSync(payload, src, { recursive: true });
 let keepSandbox = false;
 process.on("exit", () => { if (!keepSandbox) rmSync(sandbox, { recursive: true, force: true }); });
 
+// `oas spawn` resolves a RUNTIME binary (pi, or claude with --runtime claude)
+// and persists the launch command into instance.json — it does this BEFORE the
+// --no-launch check, so even a scaffold-only spawn fails with
+// "pi binary not found on PATH" when no runtime is installed. That is a host
+// dependency the probe must own rather than inherit: it passed locally only
+// because this developer laptop happens to have pi, and failed in CI which does
+// not. The probe provisions its own stub on PATH instead.
+//
+// A stub is sufficient AND safer than installing a real runtime: --no-launch
+// never executes the command, so the binary only has to be resolvable. The stub
+// exits non-zero and shouts if it is ever actually invoked, so an accidental
+// real launch surfaces as a failure rather than passing quietly. Each spawn
+// check also asserts `launched === false`.
+const runtimeBin = join(sandbox, "runtime-bin");
+mkdirSync(runtimeBin, { recursive: true });
+writeFileSync(join(runtimeBin, "pi"),
+  "#!/bin/sh\necho 'probe stub: the runtime must never be launched by --no-launch' >&2\nexit 97\n",
+  { mode: 0o755 });
+
+// The other host tool the probe must OWN rather than inherit: `acli`. Whether it
+// is installed changes doctor output and therefore spawn warnings, so leaving it
+// to the host makes results depend on whose machine runs the probe. It is
+// provisioned as a stub on the default PATH and deliberately EXCLUDED from the
+// sanitized PATH used by the missing-requirement check. OAS only ever tests for
+// presence — it must never invoke the tool — so the stub shouts if executed.
+const acliBin = join(sandbox, "acli-bin");
+mkdirSync(acliBin, { recursive: true });
+writeFileSync(join(acliBin, "acli"),
+  "#!/bin/sh\necho 'probe stub: OAS must never invoke acli' >&2\nexit 98\n",
+  { mode: 0o755 });
+
 const nodeBin = dirname(process.execPath);
 // `acli` normally lives outside the Node toolchain directory, so a PATH of just
 // the Node bin plus the base system dirs reproduces a host that never installed
 // it. Asserted below rather than trusted.
-const sanitizedPath = [nodeBin, "/usr/bin", "/bin"].join(delimiter);
+const sanitizedPath = [runtimeBin, nodeBin, "/usr/bin", "/bin"].join(delimiter);
+// Default PATH for every other kernel call. It does NOT include the ambient
+// process PATH: inheriting it is what made results differ between a laptop with
+// acli installed and CI without it. Everything the kernel may look for is
+// provisioned above.
+const probePath = [acliBin, runtimeBin, nodeBin, "/usr/bin", "/bin"].join(delimiter);
 
 function git(args, cwd) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -93,7 +129,7 @@ assert(existsSync(cli.bin), `released kernel binary not found at ${cli.bin}`);
 
 /** Run the kernel under test. Always with the sandbox HOME, never via PATH
  * lookup, so an ambient `oas` cannot answer for it. */
-function oas(args, { cwd = sandbox, path = process.env.PATH, json = true } = {}) {
+function oas(args, { cwd = sandbox, path = probePath, json = true } = {}) {
   const r = spawnSync(cli.bin, args, {
     cwd,
     encoding: "utf8",
@@ -120,6 +156,14 @@ function parseEnvelope(r, args) {
     if (parsed !== undefined) return parsed;
   }
   throw new Error(`expected a JSON envelope from \`oas ${args.join(" ")}\`, got:\n${r.stdout}\n${r.stderr}`);
+}
+
+/** Every spawn in this probe is scaffold-only. If the kernel ever actually
+ * launched the runtime, the provisioned stub would fail loudly — but assert the
+ * reported state too, so a scaffold-only claim is never taken on faith. */
+function assertNotLaunched(envelope) {
+  assert(envelope.result.launched === false,
+    `spawn reported launched=${JSON.stringify(envelope.result.launched)} — probe spawns must be scaffold-only`);
 }
 
 /** Guard against a FALSE GREEN: `layers.tasks` only carries requirements, hooks
@@ -308,13 +352,9 @@ check("a missing `acli` is reported as an unmet host requirement", () => {
 });
 
 check("a present `acli` clears the requirement", () => {
-  // A stub is enough: OAS reports host-command PRESENCE, and must never run or
-  // authenticate the tool itself.
-  const stubDir = join(sandbox, "stub-bin");
-  mkdirSync(stubDir, { recursive: true });
-  const stub = join(stubDir, "acli");
-  writeFileSync(stub, "#!/bin/sh\necho 'probe stub: OAS must never invoke acli'\nexit 0\n", { mode: 0o755 });
-  const { envelope } = oas(["doctor", activeScope, "--json"], { path: [stubDir, sanitizedPath].join(delimiter) });
+  // The provisioned stub is enough: OAS reports host-command PRESENCE and must
+  // never run or authenticate the tool itself.
+  const { envelope } = oas(["doctor", activeScope, "--json"], { path: probePath });
   assertTasksLayerActive(envelope);
   assert((envelope.layers?.tasks?.missingRequires || []).length === 0,
     `requirement still reported with acli present: ${JSON.stringify(envelope.layers?.tasks?.missingRequires)}`);
@@ -406,6 +446,7 @@ check("spawn composes the tasks layer and reports incomplete settings", () => {
   oas(["create", "probe-dev", "--description", "probe soul"], { cwd: adoptScope, json: false });
   const { envelope } = oas(["spawn", "probe-dev", "--purpose", "unset", "--no-launch", "--json"], { cwd: adoptScope });
   assert(envelope.ok, `spawn failed: ${JSON.stringify(envelope.error)}`);
+  assertNotLaunched(envelope);
   const instanceHome = envelope.result.home;
 
   const composed = readFileSync(join(instanceHome, "AGENTS.md"), "utf8");
@@ -426,9 +467,13 @@ check("spawn is clean once the adopter supplies site and project", () => {
   oas(["use", CAPABILITY, "--global", "--settings", "site=example.atlassian.net", "project=PROJ", "--dir", adoptScope], { json: false });
   const { envelope } = oas(["spawn", "probe-dev", "--purpose", "set", "--no-launch", "--json"], { cwd: adoptScope });
   assert(envelope.ok, `spawn failed: ${JSON.stringify(envelope.error)}`);
+  assertNotLaunched(envelope);
+  // Zero warnings is only a meaningful assertion because the probe controls the
+  // host: acli is provisioned on probePath, so a requirement warning here would
+  // be a real regression rather than a property of the machine.
   const warnings = envelope.result.warnings || [];
   assert(warnings.length === 0, `spawn still warned with complete settings: ${JSON.stringify(warnings)}`);
-  return "no warnings with site + project set";
+  return "no warnings with site + project set (host requirements provisioned)";
 });
 
 check("an untrusted capability composes instructions but never runs its hook", () => {
@@ -442,6 +487,7 @@ check("an untrusted capability composes instructions but never runs its hook", (
   oas(["create", "probe-dev", "--description", "probe soul"], { cwd: scope, json: false });
   const { envelope } = oas(["spawn", "probe-dev", "--purpose", "u", "--no-launch", "--json"], { cwd: scope });
   assert(envelope.ok, `spawn failed: ${JSON.stringify(envelope.error)}`);
+  assertNotLaunched(envelope);
   const warnings = envelope.result.warnings || [];
   assert(warnings.some((w) => /executable surface disabled/.test(w)),
     `untrusted spawn did not report the disabled executable surface: ${JSON.stringify(warnings)}`);
