@@ -80,3 +80,38 @@ test("bare discovery reaches a nested agent worktree and explicit paths do not",
   assert.ok(!existsSync(sentinel),
     "explicit test paths still executed the nested agent worktree's test file");
 });
+
+test("the spawned runner reports truthfully: failing suite exits nonzero, passing exits zero", (t) => {
+  // Node sets NODE_TEST_CONTEXT=child-v8 in test-file processes and children
+  // inherit it. A spawned `node --test` that inherits it refuses to recurse and
+  // exits 0 with no report — reproduced on this Node: the SAME failing suite
+  // exits 1 with an 831-byte report on a clean env, and exits 0 with 182 bytes
+  // (just a recursion warning) with the variable inherited. Passing and failing
+  // become indistinguishable, so a harness that spawns the runner would report
+  // green over red.
+  //
+  // The strip in run() is therefore load-bearing, not hygiene. This asserts the
+  // property the fixture above depends on: that its spawned runner's exit codes
+  // mean something.
+  const fixture = mkdtempSync(join(tmpdir(), "oas-runner-truth-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  mkdirSync(join(fixture, "test"), { recursive: true });
+  writeFileSync(join(fixture, "test", "pass.test.mjs"),
+    'import test from "node:test";\ntest("passes", () => {});\n');
+  writeFileSync(join(fixture, "test", "fail.test.mjs"),
+    'import test from "node:test";\nimport assert from "node:assert/strict";\ntest("fails", () => { assert.equal(1, 2); });\n');
+
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.NODE_TEST_CONTEXT;
+  delete cleanEnv.NODE_OPTIONS;
+  const run = (file) => spawnSync(process.execPath, ["--test", file], { cwd: fixture, encoding: "utf8", env: cleanEnv });
+
+  const failing = run("test/fail.test.mjs");
+  assert.notEqual(failing.status, 0,
+    `a failing nested suite exited 0 — the spawned runner is not reporting real results:\n${failing.stdout}${failing.stderr}`);
+  assert.match(failing.stdout, /fail 1/, "a failing nested suite produced no readable failure report");
+
+  const passing = run("test/pass.test.mjs");
+  assert.equal(passing.status, 0, `a passing nested suite exited ${passing.status}:\n${passing.stdout}${passing.stderr}`);
+  assert.match(passing.stdout, /pass 1/, "a passing nested suite produced no readable report");
+});
