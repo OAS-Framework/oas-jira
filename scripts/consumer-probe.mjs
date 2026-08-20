@@ -68,11 +68,29 @@ process.on("exit", () => { if (!keepSandbox) rmSync(sandbox, { recursive: true, 
 // exits non-zero and shouts if it is ever actually invoked, so an accidental
 // real launch surfaces as a failure rather than passing quietly. Each spawn
 // check also asserts `launched === false`.
+const stubSentinels = join(sandbox, "stub-invocations");
+mkdirSync(stubSentinels, { recursive: true });
+
+/** Write a stub that RECORDS its own invocation.
+ *
+ * Writing to stderr and exiting nonzero is not a guarantee — the probe captures
+ * stderr but never inspects it, and a kernel that ran a stub and ignored the
+ * failure would still return a parseable success envelope. Review demonstrated
+ * exactly that: with a wrapper that invoked both stubs and swallowed their exit
+ * codes, the probe still passed 14/14. The sentinel file is the enforcement:
+ * assertNoStubExecuted() runs after EVERY kernel call, so an invocation fails
+ * the probe at the call that caused it, whatever the kernel reports. */
+function writeStub(dir, name, why) {
+  mkdirSync(dir, { recursive: true });
+  const sentinel = join(stubSentinels, name);
+  writeFileSync(join(dir, name),
+    `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${JSON.stringify(sentinel)}\necho ${JSON.stringify(`probe stub: ${why}`)} >&2\nexit 97\n`,
+    { mode: 0o755 });
+  return sentinel;
+}
+
 const runtimeBin = join(sandbox, "runtime-bin");
-mkdirSync(runtimeBin, { recursive: true });
-writeFileSync(join(runtimeBin, "pi"),
-  "#!/bin/sh\necho 'probe stub: the runtime must never be launched by --no-launch' >&2\nexit 97\n",
-  { mode: 0o755 });
+const piSentinel = writeStub(runtimeBin, "pi", "the runtime must never be launched by --no-launch");
 
 // The other host tool the probe must OWN rather than inherit: `acli`. Whether it
 // is installed changes doctor output and therefore spawn warnings, so leaving it
@@ -81,10 +99,19 @@ writeFileSync(join(runtimeBin, "pi"),
 // sanitized PATH used by the missing-requirement check. OAS only ever tests for
 // presence — it must never invoke the tool — so the stub shouts if executed.
 const acliBin = join(sandbox, "acli-bin");
-mkdirSync(acliBin, { recursive: true });
-writeFileSync(join(acliBin, "acli"),
-  "#!/bin/sh\necho 'probe stub: OAS must never invoke acli' >&2\nexit 98\n",
-  { mode: 0o755 });
+const acliSentinel = writeStub(acliBin, "acli", "OAS reports acli PRESENCE and must never invoke it");
+
+const STUBS = [{ name: "pi", sentinel: piSentinel }, { name: "acli", sentinel: acliSentinel }];
+
+/** Fail the probe if any provisioned stub was executed. Called after every
+ * kernel invocation so the failure names the command responsible. */
+function assertNoStubExecuted(args) {
+  for (const stub of STUBS) {
+    if (!existsSync(stub.sentinel)) continue;
+    const invocations = readFileSync(stub.sentinel, "utf8").trim();
+    throw new Error(`\`oas ${args.join(" ")}\` EXECUTED the ${stub.name} stub — OAS must only resolve it, never run it.\nInvocations:\n${invocations}`);
+  }
+}
 
 const nodeBin = dirname(process.execPath);
 // `acli` normally lives outside the Node toolchain directory, so a PATH of just
@@ -135,6 +162,7 @@ function oas(args, { cwd = sandbox, path = probePath, json = true } = {}) {
     encoding: "utf8",
     env: { ...process.env, HOME: home, PATH: path, OAS_PROBE: "1" },
   });
+  assertNoStubExecuted(args);
   if (!json) return { status: r.status, stdout: r.stdout, stderr: r.stderr };
   return { status: r.status, envelope: parseEnvelope(r, args), stdout: r.stdout, stderr: r.stderr };
 }
@@ -526,6 +554,10 @@ check("acquisition from a Git source selects the conventional oas-package root",
 });
 
 // ------------------------------------------------------------------- report
+// Backstop: also refuse to report success if a stub ran outside a tracked call.
+try { assertNoStubExecuted(["<final check>"]); }
+catch (error) { failed++; results.push({ ok: false, name: "no provisioned host stub was ever executed", detail: error.message }); process.stdout.write(`  FAIL  no provisioned host stub was ever executed\n        ${error.message.replace(/\n/g, "\n        ")}\n`); }
+
 const passed = results.filter((r) => r.ok).length;
 process.stdout.write(`\n${failed ? "FAILED" : "PASSED"}: ${passed}/${results.length} consumer checks against the released kernel.\n`);
 if (failed) { keepSandbox = true; process.stdout.write(`Sandbox kept for inspection: ${sandbox}\n`); }
