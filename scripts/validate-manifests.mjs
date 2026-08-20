@@ -203,13 +203,22 @@ for (const [index, capabilityDir] of declaredCapabilities.entries()) {
   // kernel materialize the capability flat into
   // .agents/capabilities/installed/<id>/ and hash it independently.
   const capabilityRoot = dirname(manifestPath);
-  const declare = (resource, resourceAt, kind, walk = false) => {
+  // `walk`: descend a declared directory looking for escaping descendants.
+  // `mustBeDirectory`: the kernel treats the two tree-shaped declarations
+  // DIFFERENTLY — a `skills` entry is walked only when it happens to be a
+  // directory, while a capability-defined `agents` entry that is not a directory
+  // is rejected outright as capability-not-self-contained. Porting both as
+  // "walk if directory" silently accepts a file agent the kernel refuses.
+  const declare = (resource, resourceAt, kind, { walk = false, mustBeDirectory = false } = {}) => {
     const real = safeResource(capabilityRoot, resource, resourceAt, kind, capabilityRoot);
-    if (real && walk && lstatSync(real).isDirectory()) walkContained(real, capabilityRoot, resourceAt, kind, resource);
+    if (!real) return;
+    const isDirectory = lstatSync(real).isDirectory();
+    if (mustBeDirectory && !isDirectory) { report(resourceAt, `${kind} "${resource}" is not a directory`); return; }
+    if (walk && isDirectory) walkContained(real, capabilityRoot, resourceAt, kind, resource);
   };
-  for (const [i, resource] of (manifest.skills || []).entries()) declare(resource, `${capabilityDir}/oas.json.skills[${i}]`, "skill path", true);
+  for (const [i, resource] of (manifest.skills || []).entries()) declare(resource, `${capabilityDir}/oas.json.skills[${i}]`, "skill tree", { walk: true });
   if (manifest.inject) declare(manifest.inject, `${capabilityDir}/oas.json.inject`, "injection path");
-  for (const [i, agent] of (manifest.agents || []).entries()) declare(agent, `${capabilityDir}/oas.json.agents[${i}]`, "agent path", true);
+  for (const [i, agent] of (manifest.agents || []).entries()) declare(agent, `${capabilityDir}/oas.json.agents[${i}]`, "capability-defined agent", { walk: true, mustBeDirectory: true });
   // A hook may be a plain "entrypoint args" string or the object form
   // { command, required } (only the spawn hook may set required). Commands are
   // always strings. Reduce either to the executable entrypoint for containment.

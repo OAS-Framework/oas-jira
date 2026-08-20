@@ -19,7 +19,8 @@
 //   * a sanitized PATH for the requirement check, so a host that happens to
 //     have `acli` cannot mask missing-requirement reporting;
 //   * the payload is copied out of the repo, so nothing here mutates the tree.
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
@@ -141,6 +142,34 @@ function newScope(name, { asGitRepo = false, withAgents = false } = {}) {
   return dir;
 }
 
+/** A content-aware digest of a materialized artifact tree.
+ *
+ * Comparing file NAMES is not enough to call a restore "exact": a restore that
+ * recreates every path while corrupting bytes, flipping the executable bit, or
+ * repointing a symlink would look identical. The kernel's own integrity
+ * bookkeeping would normally catch that, but a probe exists to VERIFY the kernel,
+ * not to take its word for it — so this hashes content independently.
+ *
+ * Covers, per entry: relative path, entry type, symlink target, the executable
+ * bit (a hook that lost +x is a real regression), and file bytes. */
+function artifactDigest(dir) {
+  const hash = createHash("sha256");
+  const walk = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const path = join(current, entry.name);
+      const rel = relative(dir, path);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) { hash.update(`L ${rel} -> ${readlinkSync(path)}\n`); continue; }
+      if (stat.isDirectory()) { hash.update(`D ${rel}\n`); walk(path); continue; }
+      hash.update(`F ${rel} ${(stat.mode & 0o111) ? "x" : "-"} `);
+      hash.update(createHash("sha256").update(readFileSync(path)).digest("hex"));
+      hash.update("\n");
+    }
+  };
+  walk(dir);
+  return `sha256-${hash.digest("hex")}`;
+}
+
 function walkFiles(dir, base = dir) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -215,7 +244,7 @@ check("bare install restores the locked artifact EXACTLY and preserves trust", (
   const before = readFileSync(lockPath, "utf8");
   assert(JSON.parse(before).capabilities[CAPABILITY].trusted === true, "trust did not take effect");
   const artifact = join(flatScope, ".agents", "capabilities", "installed", CAPABILITY);
-  const filesBefore = walkFiles(artifact);
+  const digestBefore = artifactDigest(artifact);
 
   rmSync(join(flatScope, ".agents", "capabilities", "installed"), { recursive: true, force: true });
   const { envelope } = oas(["install", "--dir", flatScope, "--no-requirements", "--json"]);
@@ -223,10 +252,14 @@ check("bare install restores the locked artifact EXACTLY and preserves trust", (
 
   const after = readFileSync(lockPath, "utf8");
   assert(after === before, "restore rewrote the lock — a lock must never advance silently on restore");
-  assert(JSON.stringify(walkFiles(artifact)) === JSON.stringify(filesBefore), "restore produced a different file set");
+  // Independent of the kernel's own integrity bookkeeping: same paths, same
+  // bytes, same modes, same link targets.
+  const digestAfter = artifactDigest(artifact);
+  assert(digestAfter === digestBefore,
+    `restore did not reproduce the artifact byte-for-byte (${digestBefore} → ${digestAfter})`);
   assert(JSON.parse(after).capabilities[CAPABILITY].trusted === true,
     "restore reset trust — materialization is not reproducing the exact locked artifact integrity");
-  return "lock byte-identical, artifact reproduced, trust preserved";
+  return `lock byte-identical, artifact reproduced bit-for-bit (${digestBefore.slice(0, 19)}…), trust preserved`;
 });
 
 // --------------------------------------------------- 3. requirement reporting
@@ -383,7 +416,11 @@ check("spawn is clean once the adopter supplies site and project", () => {
 check("an untrusted capability composes instructions but never runs its hook", () => {
   const scope = newScope("untrusted-spawn", { asGitRepo: true, withAgents: true });
   oas(["init", "--package", src, "--dir", scope, "--json"]);
-  oas(["use", CAPABILITY, "--global", "--settings", "site=example.atlassian.net", "project=PROJ", "--dir", scope], { json: false });
+  // Settings are left UNSET on purpose. This check proves the hook did not run
+  // by the ABSENCE of the hook's own output, and absence only means something
+  // when the hook WOULD have spoken had it run: with settings unset a running
+  // hook emits "settings incomplete". With settings complete this hook is
+  // silent, so the same assertion would pass even if the hook had executed.
   oas(["create", "probe-dev", "--description", "probe soul"], { cwd: scope, json: false });
   const { envelope } = oas(["spawn", "probe-dev", "--purpose", "u", "--no-launch", "--json"], { cwd: scope });
   assert(envelope.ok, `spawn failed: ${JSON.stringify(envelope.error)}`);
@@ -391,10 +428,18 @@ check("an untrusted capability composes instructions but never runs its hook", (
   assert(warnings.some((w) => /executable surface disabled/.test(w)),
     `untrusted spawn did not report the disabled executable surface: ${JSON.stringify(warnings)}`);
   assert(!warnings.some((w) => /settings incomplete/.test(w)),
-    "the hook produced its own output while untrusted — it must not have run");
+    "the hook emitted its incomplete-settings warning while untrusted — it must not have run");
+  // Belt and braces: no trace of the hook's identity/brief output anywhere in
+  // the spawn envelope either.
+  const envelopeText = JSON.stringify(envelope.result);
+  assert(!/agent-probe-dev-u/.test(envelopeText),
+    "the untrusted hook's label output reached the spawn envelope — it must not have run");
+
   const composed = readFileSync(join(envelope.result.home, "AGENTS.md"), "utf8");
   assert(/Tasks: Jira/.test(composed), "the non-executable surface (instructions) was withheld — only hooks are trust-gated");
-  return "instructions composed; hook withheld pending `oas trust`";
+  assert(existsSync(join(envelope.result.home, ".agents", "skills", "jira-tasks", "SKILL.md")),
+    "the jira-tasks skill was withheld — only executable surfaces are trust-gated");
+  return "instructions + skill composed; hook provably silent pending `oas trust`";
 });
 
 // -------------------------------------------------- 8. git-source acquisition

@@ -220,6 +220,46 @@ test("validator rejects a declared capability directory containing an escaping d
   assert.match(result.stderr, /contains a path escaping its capability root/);
 });
 
+test("validator rejects a capability-defined agent that is not a directory", (t) => {
+  // Kernel parity: assertCapabilitySelfContained walks a `skills` entry only when
+  // it happens to be a directory, but REJECTS a non-directory `agents` entry
+  // outright. Treating both as "walk if directory" accepted a file agent here
+  // that released 0.20 refuses.
+  const result = runFixture(t, ["capabilities/one"], {
+    configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
+  }, {
+    templates: { "config-templates/default/oas-config.yaml": PORTABLE_TEMPLATE },
+    capabilityManifest: { agents: ["agents/solo.md"] },
+    capabilityFiles: { "agents/solo.md": "# a soul, wrongly declared as a file\n" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /capability-defined agent "agents\/solo\.md" is not a directory/);
+});
+
+test("validator accepts a capability-defined agent directory", (t) => {
+  const result = runFixture(t, ["capabilities/one"], {
+    configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
+  }, {
+    templates: { "config-templates/default/oas-config.yaml": PORTABLE_TEMPLATE },
+    capabilityManifest: { agents: ["agents/solo"] },
+    capabilityFiles: { "agents/solo/AGENTS.md": "# a soul\n" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("validator still walks a skill tree that is a plain file without demanding a directory", (t) => {
+  // The other half of the parity rule: a file `skills` entry is contained and
+  // therefore acceptable — only `agents` carries the directory requirement.
+  const result = runFixture(t, ["capabilities/one"], {
+    configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
+  }, {
+    templates: { "config-templates/default/oas-config.yaml": PORTABLE_TEMPLATE },
+    capabilityManifest: { skills: ["skills/SKILL.md"] },
+    capabilityFiles: { "skills/SKILL.md": "# skill\n" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("validator rejects deployment targeting in a capability manifest", (t) => {
   const result = runFixture(t, ["capabilities/one"], {
     configTemplates: { default: { path: "config-templates/default/oas-config.yaml", default: true } },
