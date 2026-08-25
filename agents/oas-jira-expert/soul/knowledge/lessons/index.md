@@ -1,0 +1,10 @@
+# Lessons
+
+* [The kernel treats capability agents and skills asymmetrically](agents-vs-skills-containment-asymmetry.md) - assertCapabilitySelfContained requires every agents[] entry to be a directory but walks a skills[] entry only when it happens to be one.
+* [Bare `node --test` in an OAS repo executes nested agent-instance worktrees](bare-node-test-discovery-in-agents-root.md) - A repo that is also an agents root has live instance worktrees under agents/<soul>/instances/<id>/work, and default test discovery recurses into their copies of test/.
+* [Capability artifact integrity covers provenance, not just capability bytes](capability-integrity-is-provenance-bound.md) - The materialized artifact hash includes the generated .oas-installation.json, so identical source bytes acquired from a path vs a git source hash differently.
+* [oas use cannot bootstrap a scope that has no oas-config.yaml](oas-use-needs-a-config-chain.md) - Capability discovery walks the config chain, so `oas install` + `oas use` alone fails in a config-less scope even though the artifact is installed.
+* [Encode the property, not a list of known prefixes](portability-lint-encode-the-property.md) - A "machine path" lint that enumerated /Users/, /home/ and C:\ accepted /tmp, /opt, ~/…, C:/…, UNC and root-relative Windows paths while still claiming to reject machine paths.
+* [Consumer probes must assert the layer is activated or they pass for the wrong reason](probe-must-assert-layer-activation.md) - doctor's layers.<slot> is empty unless config binds the layer, so requirement and hook assertions silently succeed against an unbound layer.
+* [A consumer probe must provision every host tool it depends on, not inherit them](probe-must-own-its-host-tools.md) - Two probe checks passed only because the developer laptop had pi and acli installed; CI without them failed three checks and would have silently altered a fourth.
+* [Executable trust withholds hooks only — instructions and skills still compose](trust-gates-hooks-not-instructions.md) - An untrusted capability contributes its injection and skills normally; only commands/hooks are suppressed, and spawn says so explicitly.
